@@ -201,6 +201,7 @@ class ChatToolCallBuffer:
         self._identities: dict[int, ToolCallIdentityResolver] = {}
         self._calls: dict[tuple[int, int], _PendingCall] = {}
         self._finished: dict[int, tuple[Any, Any]] = {}
+        self._refused_choices: set[int] = set()
         self._native = native
         self._native_group: _NativeGroup | None = None
 
@@ -246,6 +247,10 @@ class ChatToolCallBuffer:
                 raise chat_failure("Chat choice changed after completion")
             delta = dict(choice.get("delta") or {})
             calls = delta.pop("tool_calls", None) or []
+            if delta.get("refusal"):
+                self._refused_choices.add(choice_index)
+            if choice_index in self._refused_choices:
+                calls = ()
             finish = choice.get("finish_reason")
             ordinary = {**choice, "delta": delta, "finish_reason": None}
             if delta or any(
@@ -461,9 +466,10 @@ class ChatToolCallBuffer:
         self._buffer.append(deepcopy(value), size=_size(value))
 
     def _finish_choice(self, choice: Mapping[str, Any]) -> None:
-        keys = [key for key in self._calls if key[0] == choice.get("index", 0)]
+        index = choice.get("index", 0)
+        keys = [key for key in self._calls if key[0] == index]
         reason = choice.get("finish_reason")
-        if reason in {"stop", "tool_calls"}:
+        if reason in {"stop", "tool_calls"} and index not in self._refused_choices:
             for key in keys:
                 self._calls[key].seal()
             for key in keys:
@@ -472,6 +478,7 @@ class ChatToolCallBuffer:
             for key in keys:
                 self._buffer.discard(key)
                 del self._calls[key]
+        self._refused_choices.discard(index)
         self._remember_finish(choice)
 
     def _aligned_finish(
